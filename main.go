@@ -54,6 +54,7 @@ type content struct {
 
 type server struct {
 	root string
+	llm  *qwenClient
 }
 
 type agentAction struct {
@@ -70,7 +71,10 @@ func main() {
 		root = configured
 	}
 
-	s := &server{root: root}
+	s := &server{
+		root: root,
+		llm:  newQwenClientFromEnv(),
+	}
 	if err := s.serve(os.Stdin, os.Stdout); err != nil {
 		fatal(err)
 	}
@@ -224,6 +228,11 @@ func (s *server) tools() []tool {
 			Description: "Execute a multi-step action plan with step-by-step logs.",
 			InputSchema: objSchema([]string{"actions"}, map[string]any{"actions": map[string]any{"type": "array", "items": map[string]any{"type": "object"}}, "dry_run": map[string]any{"type": "boolean", "default": false}}),
 		},
+		{
+			Name:        "agent_run",
+			Description: "Use Qwen 3.5 model to autonomously call filesystem tools and finish a task.",
+			InputSchema: objSchema([]string{"task"}, map[string]any{"task": strSchema("task to complete"), "max_steps": map[string]any{"type": "integer", "minimum": 1, "maximum": 20, "default": 8}}),
+		},
 	}
 }
 
@@ -311,6 +320,13 @@ func (s *server) callTool(raw json.RawMessage) (toolCallResult, error) {
 		}
 		dryRun := argBool(req.Arguments, "dry_run", false)
 		return s.toolAgentExecute(actions, dryRun)
+	case "agent_run":
+		task, err := argString(req.Arguments, "task")
+		if err != nil {
+			return toolCallResult{}, err
+		}
+		maxSteps := argInt(req.Arguments, "max_steps", 8)
+		return s.toolAgentRun(task, maxSteps)
 	default:
 		return toolCallResult{}, fmt.Errorf("unknown tool: %s", req.Name)
 	}
@@ -574,6 +590,13 @@ func (s *server) toolAgentExecute(actions []agentAction, dryRun bool) (toolCallR
 		}
 	}
 	return textResult(strings.Join(logs, "\n")), nil
+}
+
+func (s *server) toolAgentRun(task string, maxSteps int) (toolCallResult, error) {
+	if s.llm == nil || !s.llm.Enabled() {
+		return toolCallResult{}, errors.New("qwen is not configured, set QWEN_API_KEY (and optional QWEN_BASE_URL/QWEN_MODEL)")
+	}
+	return s.llm.Run(task, maxSteps, s)
 }
 
 func firstLine(s string, n int) string {
